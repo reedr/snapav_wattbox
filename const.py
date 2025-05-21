@@ -1,0 +1,9 @@
+"""Constants for the SnapAV Wattbox integration."""
+
+DOMAIN = "Wattbox"
+WATTBOX_MANUFACTURER = "SnapAV"
+WATTBOX_TITLE = "SnapAV Wattbox"
+
+WATTBOX_CONNECT_TIMEOUT = 20
+WATTBOX_RESPONSE_TIMEOUT = 2
+WATTBOX_PORT = 23
