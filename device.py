@@ -20,6 +20,7 @@ DEVICE_OUTLET_NAME = "OutletName"
 DEVICE_OUTLET_SET = "OutletSet"
 DEVICE_SERIAL = "Serial"
 DEVICE_TOGGLE = "TOGGLE"
+DEVICE_HOSTNAME = "Hostname"
 
 class WattboxDevice:
     """Represents a single Wattbox device."""
@@ -125,6 +126,7 @@ class WattboxDevice:
     async def async_init(self, data_callback: callback) -> None:
         """Query position and wait for response."""
         await self.send_query(DEVICE_MODEL)
+        await self.send_query(DEVICE_HOSTNAME)
         await self.send_query(DEVICE_OUTLET_COUNT)
         await self.send_query(DEVICE_OUTLET_NAME)
         await asyncio.wait_for(
@@ -180,6 +182,8 @@ class WattboxDevice:
                 elif method == DEVICE_OUTLET_STATUS:
                     self._outlet_status = [x == "1" for x in data.split(",")]
                 elif method == DEVICE_SERIAL:
+                    self._device_id = data
+                elif method == DEVICE_HOSTNAME:
                     self._device_id = data
 
                 if self._callback is not None:
