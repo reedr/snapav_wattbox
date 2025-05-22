@@ -6,11 +6,7 @@ import re
 
 from homeassistant.core import HomeAssistant, callback
 
-from .const import (
-    WATTBOX_CONNECT_TIMEOUT,
-    WATTBOX_PORT,
-    WATTBOX_RESPONSE_TIMEOUT,
-)
+from .const import WATTBOX_CONNECT_TIMEOUT, WATTBOX_PORT, WATTBOX_RESPONSE_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,6 +14,7 @@ DEVICE_MODEL = "Model"
 DEVICE_ON = "ON"
 DEVICE_OFF = "OFF"
 DEVICE_RESET = "RESET"
+DEVICE_OUTLET_COUNT = "OutletCount"
 DEVICE_OUTLET_STATUS = "OutletStatus"
 DEVICE_OUTLET_NAME = "OutletName"
 DEVICE_OUTLET_SET = "OutletSet"
@@ -34,7 +31,7 @@ class WattboxDevice:
         self._host = host
         self._username = username
         self._password = password
-        self._device_id = None
+        self._device_id = f"WB@{host}"
         self._reader: asyncio.StreamReader
         self._writer: asyncio.StreamWriter
         self._init_event = asyncio.Event()
@@ -42,9 +39,10 @@ class WattboxDevice:
         self._callback = None
         self._listener = None
         self._data = {}
+        self._outlet_count = 0
         self._outlet_name = []
         self._outlet_status = []
-        self._response_re = re.compile("((#)(.+)|(OK)|\\?([^=]+)=(.+))")
+        self._response_re = re.compile("(\\?|~)([^=]+)=(.+)")
 
     @property
     def device_id(self) -> str:
@@ -56,7 +54,6 @@ class WattboxDevice:
         """Return status."""
         return self._online
 
-    @property
     def get_data_value(self, key: str) -> str:
         """Return a string value."""
         return self._data.get(key)
@@ -72,14 +69,20 @@ class WattboxDevice:
                 asyncio.open_connection(self._host, WATTBOX_PORT),
                 timeout=WATTBOX_CONNECT_TIMEOUT,
             )
-            await self._reader.readuntil("Username: ")
-            self.send_to_device(self._username)
-            await self._reader.readuntil("Password: ")
-            self.send_to_device(self._password)
-            if await self.query_and_response(DEVICE_MODEL):
-                if await self.query_and_response(DEVICE_SERIAL):
-                    if await self.query_and_response(DEVICE_OUTLET_NAME):
-                        self._online = True
+            await asyncio.wait_for(
+                self._reader.readuntil(b"Username: "),
+                timeout=WATTBOX_RESPONSE_TIMEOUT
+            )
+            self.write(self._username)
+            await asyncio.wait_for(
+                self._reader.readuntil(b"Password: "),
+                timeout=WATTBOX_RESPONSE_TIMEOUT
+            )
+            self.write(self._password)
+            await asyncio.wait_for(
+                self._reader.readuntil(b"Successfully Logged In!"),
+                timeout=WATTBOX_RESPONSE_TIMEOUT
+            )
             if test:
                 self._writer.close()
             else:
@@ -93,57 +96,22 @@ class WattboxDevice:
 
         return True
 
-    async def send_to_device(self, reqstr: str) -> None:
+    def write(self, reqstr: str) -> None:
         """Make an API call."""
-        if await self.open_connection():
-            _LOGGER.debug("-> %s", reqstr)
-            self._writer.write(reqstr.encode("ascii"))
+        _LOGGER.debug("-> %s", reqstr)
+        self._writer.write(reqstr.encode("ascii") + b"\n")
 
     async def send_query(self, method: str) -> None:
         """Format and send command."""
-        reqstr = f"?{method}\n"
-        await self.send_to_device(reqstr)
+        if await self.open_connection():
+            reqstr = f"?{method}"
+            self.write(reqstr)
 
     async def send_command(self, method: str, data: str) -> None:
         """Format and send command."""
-        reqstr = f"!{method}={data}\n"
-        await self.send_to_device(reqstr)
-
-    def decode_response(self, resp: str) -> bool:
-        """Decode the response."""
-        respstr = resp.decode("ascii")
-        _LOGGER.debug("<- %s", respstr)
-        m = self._response_re.match(respstr)
-        if m is None:
-            return None
-        result = m.group(2)
-        if result == "OK":
-            return True
-        elif result == "#":
-            return False
-        else:
-            method = m.group(2)
-            data = m.group(3)
-            self._data[method] = data
-            if method == DEVICE_OUTLET_NAME:
-                self._outlet_name = data.split(',')
-            elif method == DEVICE_OUTLET_STATUS:
-                self._outlet_status = [x == "1" for x in data.split(",")]
-            elif method == DEVICE_SERIAL:
-                self._device_id = data
-            return True
-
-    async def query_and_response(self, method: str) -> bool:
-        """Send a query and wait for reponse."""
-        self.send_query(method)
-        try:
-            devresp = await asyncio.wait_for(
-                self._reader.readline(), timeout=WATTBOX_RESPONSE_TIMEOUT
-            )
-            return self.decode_response(devresp)
-
-        except TimeoutError:
-            return False
+        if await self.open_connection():
+            reqstr = f"!{method}={data}"
+            self.write(reqstr)
 
     async def test_connection(self) -> bool:
         """Test a connect."""
@@ -151,30 +119,79 @@ class WattboxDevice:
 
     async def update_data(self) -> None:
         """Stuff that has to be polled."""
-        self.send_query(DEVICE_OUTLET_STATUS)
+        _LOGGER.debug("update data")
+        await self.send_query(DEVICE_OUTLET_STATUS)
 
     async def async_init(self, data_callback: callback) -> None:
         """Query position and wait for response."""
+        await self.send_query(DEVICE_MODEL)
+        await self.send_query(DEVICE_OUTLET_COUNT)
+        await self.send_query(DEVICE_OUTLET_NAME)
+        await asyncio.wait_for(
+            self._init_event.wait(),
+            timeout=WATTBOX_RESPONSE_TIMEOUT
+        )
+        _LOGGER.debug("initialized")
         self._callback = data_callback
-        await self.update_data()
 
     async def listener(self) -> None:
         """Listen for status updates from device."""
 
-        while True:
-            buf = await self._reader.readline()
-            if len(buf) == 0:
-                _LOGGER.error("Connection closed")
-                break
-            if self.decode_response(buf):
-                self._init_event.set()
+        _LOGGER.debug("listener started")
+        try:
+            while True:
+                buf = await self._reader.readuntil(b"\n")
+                if len(buf) == 0:
+                    _LOGGER.error("Connection closed")
+                    break
+                buf = buf[:-1]
+                respstr = buf.decode("ascii")
+                _LOGGER.debug("<- %s", respstr)
+                if respstr == "":
+                    continue
+                if respstr == "OK":
+                    _LOGGER.debug("Command succeeded")
+                    continue
+                if respstr == "#Error":
+                    _LOGGER.debug("Command error")
+                    continue
+
+                m = self._response_re.match(respstr)
+                if m is None:
+                    _LOGGER.error("Unrecognized response: %s", respstr)
+                    continue
+                method = m.group(2)
+                data = m.group(3)
+                self._data[method] = data
+                if method == DEVICE_OUTLET_COUNT:
+                    self._outlet_count = int(data)
+                    self._outlet_name = [f"outlet {i+1}" for i in range(self._outlet_count)]
+                elif method == DEVICE_OUTLET_NAME:
+                    i = 0
+                    while data is not None:
+                        n = re.match("{([^}]+)}(,(.+))?", data)
+                        _LOGGER.debug("%s %s", n.group(1), n.group(3))
+                        if n is None:
+                            break
+                        self._outlet_name[i] = n.group(1)
+                        data = n.group(3)
+                        i += 1
+                    self._init_event.set()
+                elif method == DEVICE_OUTLET_STATUS:
+                    self._outlet_status = [x == "1" for x in data.split(",")]
+                elif method == DEVICE_SERIAL:
+                    self._device_id = data
+
                 if self._callback is not None:
                     self._callback(self._data)
 
+        except Exception as exc:
+            _LOGGER.error("Exception in listener: %s", exc)
+
         self._writer.close()
         self._online = False
+        self._init_event.clear()
 
-    @property
     def is_on(self, index: int) -> bool:
         """Property power."""
         return self._outlet_status[index]

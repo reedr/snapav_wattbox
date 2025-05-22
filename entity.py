@@ -27,7 +27,7 @@ class WattboxEntity(CoordinatorEntity[WattboxCoordinator]):
         self.entity_description = desc
         self._state = None
         self._attr_name = name
-        self._attr_unique_id = f"{self.coordinator.device.device_id}_{self.device_id}"
+        self._attr_unique_id = f"{self.coordinator.device.device_id}_{name}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self.coordinator.device.device_id)},
             manufacturer=WATTBOX_MANUFACTURER,
